@@ -1,123 +1,164 @@
 import {
-  Canister,
-  Err,
-  Ok,
-  Opt,
-  Principal,
   Record,
-  Result,
   StableBTreeMap,
-  Variant,
   Vec,
-  query,
-  text,
-  update,
-} from 'azle';
+  ic,
+  $query,
+  $update,
+  Result,
+  nat64,
+  Opt,
+  match,
+  Variant,
+} from "azle";
+import { v4 as uuidv4, validate as validateUUID } from "uuid";
 
-const TaskError = Variant({
-  TaskDoesNotExist: Principal,
-});
+// Define the structure of a task
+type TaskError = Variant<{
+  TaskDoesNotExist: string;
+  InvalidTaskId: string;
+}>;
 
-type TaskError = typeof TaskError.tsType;
+type Task = Record<{
+  taskId: string;
+  description: string;
+  status: string;
+}>;
 
-const Task = Record({
-  taskId: Principal,
-  description: text,
-  status: text,
-});
+type TaskPayload = Record<{
+  description: string;
+  status: string;
+}>;
 
-type Task = typeof Task.tsType;
+// Create a stable B-tree map to store tasks
+const Tasks = new StableBTreeMap<string, Task>(0, 44, 1024);
 
-let taskList = StableBTreeMap<Principal, Task>(2);
+// Function to validate UUID format
+function isValidUUID(id: string): boolean {
+  return validateUUID(id);
+}
 
-export default Canister({
-  addTask: update(
-    [text, text],
-    Result(Task, TaskError),
-    (description, status) => {
-      const taskId = generateId();
-      const task: Task = {
-        taskId,
-        description,
-        status,
-      };
-      taskList.insert(task.taskId, task);
-
-      return Ok(task);
-    },
-  ),
-
-  deleteTask: update([Principal], Result(Task, TaskError), (taskId) => {
-    const taskOpt = taskList.get(taskId);
-
-    if ('None' in taskOpt) {
-      return Err({
-        TaskDoesNotExist: taskId,
-      });
+$update
+export function addTask(payload: TaskPayload): Result<Task, string> {
+  try {
+    // Payload Validation: Ensure that required fields are present in the payload
+    if (!payload.description || !payload.status) {
+      return Result.Err<Task, string>("Invalid payload");
     }
 
-    const task = taskOpt.Some;
+    const taskId = uuidv4();
+    const newTask: Task = {
+      taskId,
+      description: payload.description,
+      status: payload.status,
+    };
 
-    taskList.remove(task.taskId);
+    // Insert the new task into the task list
+    Tasks.insert(newTask.taskId, newTask);
 
-    return Ok(task);
-  }),
-
-  getTaskList: query([], Vec(Task), () => {
-    return taskList.values();
-  }),
-
-  getTaskDetails: query([Principal], Opt(Task), (taskId) => {
-    return taskList.get(taskId);
-  }),
-
-  updateTaskStatus: update(
-    [Principal, text],
-    Result(Task, TaskError),
-    (taskId, newStatus) => {
-      const taskOpt = taskList.get(taskId);
-
-      if ('None' in taskOpt) {
-        return Err({
-          TaskDoesNotExist: taskId,
-        });
-      }
-
-      const task = taskOpt.Some;
-      task.status = newStatus;
-
-      taskList.insert(task.taskId, task);
-
-      return Ok(task);
-    },
-  ),
-
-  updateTaskDescription: update(
-    [Principal, text],
-    Result(Task, TaskError),
-    (taskId, newDescription) => {
-      const taskOpt = taskList.get(taskId);
-
-      if ('None' in taskOpt) {
-        return Err({
-          TaskDoesNotExist: taskId,
-        });
-      }
-
-      const task = taskOpt.Some;
-      task.description = newDescription;
-
-      taskList.insert(task.taskId, task);
-
-      return Ok(task);
-    },
-  ),
-});
-
-function generateId(): Principal {
-  const randomBytes = new Array(11)
-    .fill(0)
-    .map((_) => Math.floor(Math.random() * 256));
-
-  return Principal.fromUint8Array(Uint8Array.from(randomBytes));
+    return Result.Ok(newTask);
+  } catch (error) {
+    return Result.Err<Task, string>(`Failed to add task: ${error}`);
+  }
 }
+
+$update
+export function deleteTask(taskId: string): Result<Task, string> {
+  try {
+    // ID Validation: Ensure that the provided ID is a valid UUID
+    if (!isValidUUID(taskId)) {
+      return Result.Err<Task, string>("Invalid Task ID format");
+    }
+
+    return match(Tasks.get(taskId), {
+      Some: (task) => {
+        Tasks.remove(task.taskId);
+        return Result.Ok<Task, string>(task);
+      },
+      None: () => Result.Err<Task, string>(`Task with ID=${taskId} not found`),
+    });
+  } catch (error) {
+    return Result.Err<Task, string>(`An error occurred while deleting task. Error: ${error}`);
+  }
+}
+
+$query
+export function getTaskList(): Result<Vec<Task>, string> {
+  try {
+    const tasks = Tasks.values();
+    return Result.Ok(tasks);
+  } catch (error) {
+    return Result.Err<Vec<Task>, string>(`Failed to retrieve task list: ${error}`);
+  }
+}
+
+$query
+export function getTaskDetails(taskId: string): Result<Task, string> {
+  try {
+    // ID Validation: Ensure that the provided ID is a valid UUID
+    if (!isValidUUID(taskId)) {
+      return Result.Err<Task, string>("Invalid Task ID format");
+    }
+
+    return match(Tasks.get(taskId), {
+      Some: (task) => Result.Ok<Task, string>(task),
+      None: () => Result.Err<Task, string>(`Task not found with ID: ${taskId}`),
+    });
+  } catch (error) {
+    return Result.Err<Task, string>(`An error occurred while retrieving task details. Error: ${error}`);
+  }
+}
+
+$update
+export function updateTaskStatus(taskId: string, newStatus: string): Result<Task, TaskError> {
+  try {
+    // ID Validation: Ensure that the provided ID is a valid UUID
+    if (!isValidUUID(taskId)) {
+      return Result.Err<Task, TaskError>({ InvalidTaskId: "Invalid Task ID format" });
+    }
+
+    return match(Tasks.get(taskId), {
+      Some: (task) => {
+        task.status = newStatus;
+        Tasks.insert(task.taskId, task);
+        return Result.Ok<Task, TaskError>(task);
+      },
+      None: () => Result.Err<Task, TaskError>({ TaskDoesNotExist: `Task with ID=${taskId} not found` }),
+    });
+  } catch (error) {
+  return Result.Err<Task, TaskError>({TaskDoesNotExist: `Task with ID=${taskId} not found` });
+  }
+}
+
+$update
+export function updateTaskDescription(taskId: string, newDescription: string): Result<Task, TaskError> {
+  try {
+    // ID Validation: Ensure that the provided ID is a valid UUID
+    if (!isValidUUID(taskId)) {
+      return Result.Err<Task, TaskError>({ InvalidTaskId: "Invalid Task ID format" });
+    }
+
+    return match(Tasks.get(taskId), {
+      Some: (task) => {
+        task.description = newDescription;
+        Tasks.insert(task.taskId, task);
+        return Result.Ok<Task, TaskError>(task);
+      },
+      None: () => Result.Err<Task, TaskError>({ TaskDoesNotExist: `Task with ID=${taskId} not found` }),
+    });
+  } catch (error) {
+    return Result.Err<Task, TaskError>({TaskDoesNotExist: `Task with ID=${taskId} not found` });
+  }
+}
+
+// Cryptographic utility for generating random values
+globalThis.crypto = {
+  // @ts-ignore
+  getRandomValues: () => {
+    let array = new Uint8Array(32);
+    for (let i = 0; i < array.length; i++) {
+      array[i] = Math.floor(Math.random() * 256);
+    }
+    return array;
+  },
+};
